@@ -71,7 +71,7 @@
     let account = null;
     let fileId = null;
 
-    function init() {
+    async function init() {
       if (!msalInstance) {
         msalInstance = new msal.PublicClientApplication({
           auth: {
@@ -82,16 +82,24 @@
           cache: { cacheLocation: "localStorage" },
         });
       }
-      const cached = msalInstance.getAllAccounts();
-      if (cached.length > 0) account = cached[0];
+      try {
+        const response = await msalInstance.handleRedirectPromise();
+        if (response && response.account) account = response.account;
+      } catch (e) {
+        console.error("Erro ao processar retorno do login Microsoft", e);
+      }
+      if (!account) {
+        const cached = msalInstance.getAllAccounts();
+        if (cached.length > 0) account = cached[0];
+      }
       fileId = window.localStorage.getItem("bq_onedrive_file_id") || null;
       return account;
     }
 
     async function login() {
-      const result = await msalInstance.loginPopup({ scopes: SCOPES });
-      account = result.account;
-      return account;
+      // redireciona a pagina inteira para o login da Microsoft (mais confiavel que pop-up,
+      // principalmente em navegadores que bloqueiam pop-ups ou no celular).
+      await msalInstance.loginRedirect({ scopes: SCOPES });
     }
 
     function logout() {
@@ -106,8 +114,8 @@
         const result = await msalInstance.acquireTokenSilent({ scopes: SCOPES, account: account });
         return result.accessToken;
       } catch (e) {
-        const result = await msalInstance.acquireTokenPopup({ scopes: SCOPES, account: account });
-        return result.accessToken;
+        await msalInstance.acquireTokenRedirect({ scopes: SCOPES, account: account });
+        throw new Error("Redirecionando para renovar o login...");
       }
     }
 
@@ -742,12 +750,10 @@ function App() {
     setOdStatus("connecting");
     setOdError("");
     try {
-      let account = window.oneDriveSync.init();
+      const account = await window.oneDriveSync.init();
       if (!account) {
-        account = await window.oneDriveSync.login();
-      } else {
-        try { await window.oneDriveSync.getToken(); }
-        catch (e) { account = await window.oneDriveSync.login(); }
+        await window.oneDriveSync.login(); // redireciona a pagina; nada abaixo executa
+        return;
       }
       setOdAccountName((account && (account.username || account.name)) || "");
       const buf = await window.oneDriveSync.downloadFile();
@@ -774,16 +780,19 @@ function App() {
     showToast("Desconectado do OneDrive. Os dados continuam salvos neste navegador.");
   }, [showToast]);
 
-  // tenta reconectar automaticamente se ja havia uma sessao Microsoft ativa neste navegador
+  // tenta reconectar automaticamente: cobre tanto uma sessao ja ativa quanto o retorno do
+  // redirecionamento de login (a pagina recarrega sozinha depois do login na Microsoft)
   useEffect(() => {
     if (!loaded || odAutoTried.current) return;
     odAutoTried.current = true;
-    try {
-      const acc = window.oneDriveSync.init();
-      if (acc) connectOneDrive();
-    } catch (e) {
-      console.error("Falha ao inicializar OneDrive", e);
-    }
+    (async () => {
+      try {
+        const acc = await window.oneDriveSync.init();
+        if (acc) connectOneDrive();
+      } catch (e) {
+        console.error("Falha ao inicializar OneDrive", e);
+      }
+    })();
   }, [loaded, connectOneDrive]);
 
   // load
